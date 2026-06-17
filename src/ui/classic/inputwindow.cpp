@@ -438,6 +438,31 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
             hasPrev_ = false;
             hasNext_ = false;
         }
+
+        if (auto *multiPage = candidateList->toMultiPage()) {
+            multiPage_ = true;
+            pageCount_ = multiPage->pageCount();
+            activePage_ = multiPage->activePage();
+            pageLocalStarts_.resize(pageCount_);
+            int flatIdx = 0;
+            int localIdx = 0;
+            for (int p = 0; p < pageCount_; p++) {
+                int pageStart = multiPage->pageStart(p);
+                while (flatIdx < pageStart &&
+                       flatIdx < candidateList->size()) {
+                    if (!candidateList->candidate(flatIdx).isPlaceHolder()) {
+                        localIdx++;
+                    }
+                    flatIdx++;
+                }
+                pageLocalStarts_[p] = localIdx;
+            }
+        } else {
+            multiPage_ = false;
+            pageCount_ = 0;
+            activePage_ = -1;
+            pageLocalStarts_.clear();
+        }
     } else {
         nCandidates_ = 0;
         candidateIndex_ = -1;
@@ -601,17 +626,25 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         const int highlightIndex = highlight();
         bool highlight = false;
         if (highlightIndex >= 0 && i == static_cast<size_t>(highlightIndex)) {
-            cairo_save(cr);
-            cairo_translate(cr, candidateLeft - *highlightMargin.marginLeft,
-                            candidateTop - *highlightMargin.marginTop);
-            theme.paint(cr, *theme.inputPanel->highlight,
-                        highlightWidth + *highlightMargin.marginLeft +
-                            *highlightMargin.marginRight,
-                        candidateHeight + *highlightMargin.marginTop +
-                            *highlightMargin.marginBottom,
-                        /*alpha=*/1.0, scale);
-            cairo_restore(cr);
-            highlight = true;
+            // In multi-page mode, only highlight on the active page.
+            if (!multiPage_ || activePage_ < 0 ||
+                (static_cast<int>(i) >= pageLocalStarts_[activePage_] &&
+                 (activePage_ + 1 >= pageCount_ ||
+                  static_cast<int>(i) <
+                      pageLocalStarts_[activePage_ + 1]))) {
+                cairo_save(cr);
+                cairo_translate(
+                    cr, candidateLeft - *highlightMargin.marginLeft,
+                    candidateTop - *highlightMargin.marginTop);
+                theme.paint(cr, *theme.inputPanel->highlight,
+                            highlightWidth + *highlightMargin.marginLeft +
+                                *highlightMargin.marginRight,
+                            candidateHeight + *highlightMargin.marginTop +
+                                *highlightMargin.marginBottom,
+                            /*alpha=*/1.0, scale);
+                cairo_restore(cr);
+                highlight = true;
+            }
         }
 
         Rect candidateRegion;
@@ -855,8 +888,19 @@ void InputWindow::updateYogaLayout() {
     pango_font_metrics_unref(metrics);
     fontHeight = PANGO_PIXELS(fontHeight);
 
-    // Clean up candidate nodes
+    // Clean up page row nodes:
+    // 1) Detach page rows from candidatesNode (their parent) first.
+    // 2) Then detach candidates from each page row.
+    // 3) Finally free the page row nodes.
+    // Order matters: freeing a Yoga node while it's still a child of
+    // another node leaves a dangling pointer, causing SIGSEGV on resize.
     YGNodeRemoveAllChildren(candidatesNode_.get());
+    for (auto &pageRow : pageRowNodes_) {
+        YGNodeRemoveAllChildren(pageRow.get());
+    }
+    pageRowNodes_.clear();
+
+    // Clean up candidate nodes
     for (auto &node : candidateNodes_) {
         YGNodeRemoveAllChildren(node.self.get());
         YGNodeRemoveAllChildren(node.inner.get());
@@ -924,7 +968,6 @@ void InputWindow::updateYogaLayout() {
 
     // Add candidates node if there are candidates
     if (nCandidates_ > 0) {
-        // Configure candidates node based on layout hint
         bool vertical = parent_->config().verticalCandidateList.value();
         if (layoutHint_ == CandidateLayoutHint::Vertical) {
             vertical = true;
@@ -932,75 +975,184 @@ void InputWindow::updateYogaLayout() {
             vertical = false;
         }
 
-        YGNodeStyleSetFlexDirection(lowerNode_.get(),
-                                    vertical ? YGFlexDirectionColumn
-                                             : YGFlexDirectionRow);
-        YGNodeStyleSetFlexDirection(candidatesNode_.get(),
-                                    vertical ? YGFlexDirectionColumn
-                                             : YGFlexDirectionRow);
+        if (multiPage_ && pageCount_ > 1) {
+            // Multi-page mode: pages are rows (horizontal), stacked vertically.
+            YGNodeStyleSetFlexDirection(lowerNode_.get(),
+                                        YGFlexDirectionColumn);
+            YGNodeStyleSetFlexDirection(candidatesNode_.get(),
+                                        YGFlexDirectionColumn);
 
-        // Configure individual candidate nodes
-        for (size_t i = 0; i < nCandidates_; i++) {
-            int labelW = 0;
-            int labelH = 0;
-            int candidateW = 0;
-            int candidateH = 0;
-            int commentW = 0;
-            int commentH = 0;
-
-            int labelFontHeight = fontHeight;
-            if (auto height = candidateLayouts_[i].label.fontHeight()) {
-                labelFontHeight = height;
+            // Ensure page row nodes are ready.
+            for (int p = 0; p < pageCount_; p++) {
+                pageRowNodes_.emplace_back(YGNodeNew());
+                YGNodeStyleSetFlexDirection(pageRowNodes_.back().get(),
+                                            YGFlexDirectionRow);
+                YGNodeInsertChild(candidatesNode_.get(),
+                                  pageRowNodes_.back().get(), p);
             }
 
-            int commentFontHeight = fontHeight;
-            if (auto height = candidateLayouts_[i].comment.fontHeight()) {
-                commentFontHeight = height;
-            }
-            if (candidateLayouts_[i].label.characterCount()) {
-                labelW = candidateLayouts_[i].label.width();
-            }
-            labelH = labelFontHeight *
-                     std::max(1, candidateLayouts_[i].label.size());
-            if (candidateLayouts_[i].text.characterCount()) {
-                candidateW = candidateLayouts_[i].text.width();
-            }
-            candidateH =
-                fontHeight * std::max(1, candidateLayouts_[i].text.size());
-            if (candidateLayouts_[i].comment.characterCount()) {
-                commentW = candidateLayouts_[i].comment.width();
-            }
-            commentH = commentFontHeight *
-                       std::max(1, candidateLayouts_[i].comment.size());
-            auto &candidate = candidateNodes_[i];
+            // Distribute candidates to page rows.
+            for (size_t i = 0; i < nCandidates_; i++) {
+                // Find which page this candidate belongs to.
+                int page = -1;
+                for (int p = pageCount_ - 1; p >= 0; p--) {
+                    if (static_cast<int>(i) >= pageLocalStarts_[p]) {
+                        page = p;
+                        break;
+                    }
+                }
+                if (page < 0) {
+                    page = 0;
+                }
+                int posInPage =
+                    static_cast<int>(i) - pageLocalStarts_[page];
 
-            YGNodeStyleSetFlexDirection(candidate.inner.get(),
-                                        YGFlexDirectionRow);
-            YGNodeStyleSetAlignSelf(candidate.text.get(), YGAlignCenter);
-            YGNodeStyleSetAlignSelf(candidate.label.get(), YGAlignCenter);
-            YGNodeStyleSetAlignSelf(candidate.comment.get(), YGAlignCenter);
-            YGNodeStyleSetWidth(candidate.label.get(), labelW);
-            YGNodeStyleSetHeight(candidate.label.get(), labelH);
-            YGNodeStyleSetWidth(candidate.text.get(), candidateW);
-            YGNodeStyleSetHeight(candidate.text.get(), candidateH);
-            YGNodeStyleSetWidth(candidate.comment.get(), commentW);
-            YGNodeStyleSetHeight(candidate.comment.get(), commentH);
+                int labelW = 0;
+                int labelH = 0;
+                int candidateW = 0;
+                int candidateH = 0;
+                int commentW = 0;
+                int commentH = 0;
 
-            YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeLeft,
-                                 *textMargin.marginLeft);
-            YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeRight,
-                                 *textMargin.marginRight);
-            YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeTop,
-                                 *textMargin.marginTop);
-            YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeBottom,
-                                 *textMargin.marginBottom);
+                int labelFontHeight = fontHeight;
+                if (auto height = candidateLayouts_[i].label.fontHeight()) {
+                    labelFontHeight = height;
+                }
 
-            YGNodeInsertChild(candidatesNode_.get(), candidate.self.get(), i);
-            YGNodeInsertChild(candidate.self.get(), candidate.inner.get(), 0);
-            YGNodeInsertChild(candidate.inner.get(), candidate.label.get(), 0);
-            YGNodeInsertChild(candidate.inner.get(), candidate.text.get(), 1);
-            YGNodeInsertChild(candidate.inner.get(), candidate.comment.get(),
-                              2);
+                int commentFontHeight = fontHeight;
+                if (auto height =
+                        candidateLayouts_[i].comment.fontHeight()) {
+                    commentFontHeight = height;
+                }
+                if (candidateLayouts_[i].label.characterCount()) {
+                    labelW = candidateLayouts_[i].label.width();
+                }
+                labelH = labelFontHeight *
+                         std::max(1, candidateLayouts_[i].label.size());
+                if (candidateLayouts_[i].text.characterCount()) {
+                    candidateW = candidateLayouts_[i].text.width();
+                }
+                candidateH = fontHeight *
+                             std::max(1, candidateLayouts_[i].text.size());
+                if (candidateLayouts_[i].comment.characterCount()) {
+                    commentW = candidateLayouts_[i].comment.width();
+                }
+                commentH = commentFontHeight *
+                           std::max(1, candidateLayouts_[i].comment.size());
+                auto &candidate = candidateNodes_[i];
+
+                YGNodeStyleSetFlexDirection(candidate.inner.get(),
+                                            YGFlexDirectionRow);
+                YGNodeStyleSetAlignSelf(candidate.text.get(), YGAlignCenter);
+                YGNodeStyleSetAlignSelf(candidate.label.get(), YGAlignCenter);
+                YGNodeStyleSetAlignSelf(candidate.comment.get(),
+                                        YGAlignCenter);
+                YGNodeStyleSetWidth(candidate.label.get(), labelW);
+                YGNodeStyleSetHeight(candidate.label.get(), labelH);
+                YGNodeStyleSetWidth(candidate.text.get(), candidateW);
+                YGNodeStyleSetHeight(candidate.text.get(), candidateH);
+                YGNodeStyleSetWidth(candidate.comment.get(), commentW);
+                YGNodeStyleSetHeight(candidate.comment.get(), commentH);
+
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeLeft,
+                                     *textMargin.marginLeft);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeRight,
+                                     *textMargin.marginRight);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeTop,
+                                     *textMargin.marginTop);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeBottom,
+                                     *textMargin.marginBottom);
+
+                auto &pageRow = pageRowNodes_[page];
+                YGNodeInsertChild(pageRow.get(), candidate.self.get(),
+                                  posInPage);
+                YGNodeInsertChild(candidate.self.get(),
+                                  candidate.inner.get(), 0);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.label.get(), 0);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.text.get(), 1);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.comment.get(), 2);
+            }
+        } else {
+            // Normal (single-page) mode.
+            YGNodeStyleSetFlexDirection(lowerNode_.get(),
+                                        vertical ? YGFlexDirectionColumn
+                                                 : YGFlexDirectionRow);
+            YGNodeStyleSetFlexDirection(candidatesNode_.get(),
+                                        vertical ? YGFlexDirectionColumn
+                                                 : YGFlexDirectionRow);
+
+            // Configure individual candidate nodes
+            for (size_t i = 0; i < nCandidates_; i++) {
+                int labelW = 0;
+                int labelH = 0;
+                int candidateW = 0;
+                int candidateH = 0;
+                int commentW = 0;
+                int commentH = 0;
+
+                int labelFontHeight = fontHeight;
+                if (auto height = candidateLayouts_[i].label.fontHeight()) {
+                    labelFontHeight = height;
+                }
+
+                int commentFontHeight = fontHeight;
+                if (auto height =
+                        candidateLayouts_[i].comment.fontHeight()) {
+                    commentFontHeight = height;
+                }
+                if (candidateLayouts_[i].label.characterCount()) {
+                    labelW = candidateLayouts_[i].label.width();
+                }
+                labelH = labelFontHeight *
+                         std::max(1, candidateLayouts_[i].label.size());
+                if (candidateLayouts_[i].text.characterCount()) {
+                    candidateW = candidateLayouts_[i].text.width();
+                }
+                candidateH = fontHeight *
+                             std::max(1, candidateLayouts_[i].text.size());
+                if (candidateLayouts_[i].comment.characterCount()) {
+                    commentW = candidateLayouts_[i].comment.width();
+                }
+                commentH = commentFontHeight *
+                           std::max(1, candidateLayouts_[i].comment.size());
+                auto &candidate = candidateNodes_[i];
+
+                YGNodeStyleSetFlexDirection(candidate.inner.get(),
+                                            YGFlexDirectionRow);
+                YGNodeStyleSetAlignSelf(candidate.text.get(), YGAlignCenter);
+                YGNodeStyleSetAlignSelf(candidate.label.get(), YGAlignCenter);
+                YGNodeStyleSetAlignSelf(candidate.comment.get(),
+                                        YGAlignCenter);
+                YGNodeStyleSetWidth(candidate.label.get(), labelW);
+                YGNodeStyleSetHeight(candidate.label.get(), labelH);
+                YGNodeStyleSetWidth(candidate.text.get(), candidateW);
+                YGNodeStyleSetHeight(candidate.text.get(), candidateH);
+                YGNodeStyleSetWidth(candidate.comment.get(), commentW);
+                YGNodeStyleSetHeight(candidate.comment.get(), commentH);
+
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeLeft,
+                                     *textMargin.marginLeft);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeRight,
+                                     *textMargin.marginRight);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeTop,
+                                     *textMargin.marginTop);
+                YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeBottom,
+                                     *textMargin.marginBottom);
+
+                YGNodeInsertChild(candidatesNode_.get(), candidate.self.get(),
+                                  i);
+                YGNodeInsertChild(candidate.self.get(),
+                                  candidate.inner.get(), 0);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.label.get(), 0);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.text.get(), 1);
+                YGNodeInsertChild(candidate.inner.get(),
+                                  candidate.comment.get(), 2);
+            }
         }
     }
     YGNodeStyleSetDisplay(buttonNode_.get(), YGDisplayNone);

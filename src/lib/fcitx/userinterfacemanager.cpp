@@ -106,9 +106,6 @@ void UserInterfaceManagerPrivate::updateSingleComponent<
     } else if (const auto &callback =
                    ic->inputPanel().customInputPanelCallback()) {
         callback(ic);
-    } else if (ic->capabilityFlags().test(
-                   CapabilityFlag::ClientSideInputPanel)) {
-        ic->updateClientSideUIImpl();
     } else if (ui_) {
         ui_->update(UserInterfaceComponent::InputPanel, ic);
     }

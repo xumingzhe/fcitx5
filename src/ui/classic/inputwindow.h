@@ -182,6 +182,11 @@ private:
     };
 
     std::vector<CandidateNode> candidateNodes_;
+    std::vector<YGNodePtr> pageRowNodes_;
+    bool multiPage_ = false;
+    int activePage_ = -1;
+    int pageCount_ = 0;
+    std::vector<int> pageLocalStarts_;
     YGNodePtr buttonNode_;
 
     template <auto Getter>

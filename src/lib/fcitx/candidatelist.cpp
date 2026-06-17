@@ -94,6 +94,8 @@ ActionableCandidateList::~ActionableCandidateList() = default;
 
 TabbedCandidateList::~TabbedCandidateList() = default;
 
+MultiPageCandidateList::~MultiPageCandidateList() = default;
+
 class CandidateListPrivate {
 public:
     BulkCandidateList *bulk_ = nullptr;
@@ -104,6 +106,7 @@ public:
     CursorModifiableCandidateList *cursorModifiable_ = nullptr;
     ActionableCandidateList *actionable_ = nullptr;
     TabbedCandidateList *tabbed_ = nullptr;
+    MultiPageCandidateList *multiPage_ = nullptr;
 };
 
 CandidateList::CandidateList()
@@ -153,6 +156,11 @@ TabbedCandidateList *CandidateList::toTabbed() const {
     return d->tabbed_;
 }
 
+MultiPageCandidateList *CandidateList::toMultiPage() const {
+    FCITX_D();
+    return d->multiPage_;
+}
+
 void CandidateList::setBulk(BulkCandidateList *list) {
     FCITX_D();
     d->bulk_ = list;
@@ -191,6 +199,11 @@ void CandidateList::setActionable(ActionableCandidateList *list) {
 void CandidateList::setTabbed(TabbedCandidateList *list) {
     FCITX_D();
     d->tabbed_ = list;
+}
+
+void CandidateList::setMultiPage(MultiPageCandidateList *list) {
+    FCITX_D();
+    d->multiPage_ = list;
 }
 
 class CandidateWordPrivate {

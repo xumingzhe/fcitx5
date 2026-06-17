@@ -31,6 +31,7 @@ class CursorModifiableCandidateList;
 class BulkCursorCandidateList;
 class ActionableCandidateList;
 class TabbedCandidateList;
+class MultiPageCandidateList;
 
 class CandidateListPrivate;
 
@@ -134,6 +135,14 @@ public:
      */
     TabbedCandidateList *toTabbed() const;
 
+    /**
+     * Cast to MultiPageCandidateList if available.
+     *
+     * @return MultiPageCandidateList pointer or nullptr.
+     * @since 5.1.21
+     */
+    MultiPageCandidateList *toMultiPage() const;
+
 protected:
     void setPageable(PageableCandidateList *list);
     void setBulk(BulkCandidateList *list);
@@ -150,6 +159,14 @@ protected:
      * @since 5.1.20
      */
     void setTabbed(TabbedCandidateList *list);
+
+    /**
+     * Set the MultiPageCandidateList implementation.
+     *
+     * @param list pointer to MultiPageCandidateList.
+     * @since 5.1.21
+     */
+    void setMultiPage(MultiPageCandidateList *list);
 
 private:
     std::unique_ptr<CandidateListPrivate> d_ptr;
@@ -300,6 +317,42 @@ public:
      * @since 5.1.20
      */
     virtual void triggerTabAction(int id) = 0;
+};
+
+/**
+ * Interface for candidate lists that display multiple pages simultaneously.
+ *
+ * When implemented, the candidate list presents candidates from several
+ * logical pages as a single flat list. Each page is expected to be rendered
+ * as a horizontal row, with pages stacked vertically.
+ *
+ * @since 5.1.21
+ */
+class FCITXCORE_EXPORT MultiPageCandidateList {
+public:
+    virtual ~MultiPageCandidateList();
+
+    /**
+     * Return the number of visible pages.
+     *
+     * @return page count, >= 1.
+     */
+    virtual int pageCount() const = 0;
+
+    /**
+     * Return the starting index of the given page in the flat candidate list.
+     *
+     * @param page page index, 0 <= page < pageCount().
+     * @return flat index where this page's candidates begin.
+     */
+    virtual int pageStart(int page) const = 0;
+
+    /**
+     * Return the page that currently has the cursor.
+     *
+     * @return active page index (0-based), or -1 if no cursor.
+     */
+    virtual int activePage() const = 0;
 };
 
 class DisplayOnlyCandidateListPrivate;
