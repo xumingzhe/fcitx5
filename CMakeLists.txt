@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(fcitx VERSION 5.1.20)
+project(fcitx VERSION 5.1.21)
 set(FCITX_VERSION ${PROJECT_VERSION})
 
 find_package(ECM REQUIRED 1.0.0)
@@ -42,6 +42,7 @@ option(ENABLE_LIBUUID "Use libuuid for uuid generation" On)
 option(BUILD_SPELL_DICT "Build en_dict.fscd for English spell check" On)
 option(BUILD_SHARED_LIBS "Build library as shared libs" On)
 option(USE_SYSTEM_YOGA "Use system installed yoga library" Off)
+option(USE_SYSTEM_PLASMA_WAYLAND_PROTOCOLS "Use system installed plasma protocols" On)
 set(NO_PREEDIT_APPS "wps.*,wpp.*,et.*" CACHE STRING "Disable preedit for following app by default.")
 set(EVENT_LOOP_BACKEND "auto" CACHE STRING "Set the underlying event loop implementation, valid values are auto,systemd,libuv,none")
 
@@ -177,8 +178,12 @@ if (ENABLE_WAYLAND)
     set(REQUIRED_WAYLAND_COMPONENTS Client Cursor)
     find_package(Wayland 1.22 REQUIRED COMPONENTS ${REQUIRED_WAYLAND_COMPONENTS})
     find_package(WaylandScanner REQUIRED)
-    find_package(WaylandProtocols 1.39 REQUIRED)
+    find_package(WaylandProtocols 1.46 REQUIRED)
     pkg_check_modules(Gio IMPORTED_TARGET gio-2.0)
+
+    if (USE_SYSTEM_PLASMA_WAYLAND_PROTOCOLS)
+        find_package(PlasmaWaylandProtocols 1.20 REQUIRED)
+    endif()
 endif()
 
 if(ENABLE_ENCHANT)
